@@ -4,29 +4,25 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "vite",
     "build": "tsc -b && vite build && node scripts/finalize-pwa.mjs",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "vite preview",
     "test": "tsx --test tests/*.test.ts",
-    "check:backend": "tsc --project supabase/tsconfig.json",
-    "simulator": "tsx scripts/simulator.ts",
-    "provision": "node scripts/provision.mjs"
+    "simulator": "tsx scripts/simulator.ts"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "5.3.0",
     "@fontsource-variable/manrope": "5.3.0",
-    "@supabase/supabase-js": "2.118.0",
     "lucide-react": "1.61.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.11",
+    "@types/node": "26.6.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
     "prettier": "3.9.10",
-    "supabase": "2.122.0",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "8.3.5"

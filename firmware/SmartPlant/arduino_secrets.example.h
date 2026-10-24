@@ -1,7 +1,8 @@
 #pragma once
-// Copy to arduino_secrets.h. Never commit that file or share a compiled sketch containing it.
+// Defaults work without editing: connect the laptop and phone to Verdant-Demo.
+// Optional existing-router mode: copy to arduino_secrets.h, set true, then enter Wi-Fi credentials.
+#define USE_EXISTING_WIFI false
 #define SECRET_SSID "YOUR_WIFI_NAME"
 #define SECRET_PASS "YOUR_WIFI_PASSWORD"
-#define CLOUD_HOST "YOUR_PROJECT.supabase.co"
-#define DEVICE_ID "00000000-0000-4000-8000-000000000001"
-#define DEVICE_TOKEN "REPLACE_WITH_64_HEX_CHAR_DEVICE_SECRET"
+#define DEMO_AP_SSID "Verdant-Demo"
+#define DEMO_AP_PASS "plantdemo"

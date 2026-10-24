@@ -11,6 +11,8 @@ export function demoData() {
     session_id: "demo-session",
     sample_seq: 600,
     uptime_ms: 86400000,
+    sample_age_ms: 0,
+    simulated: true,
     sensors: {
       soil_raw: 500,
       water_raw: 518,

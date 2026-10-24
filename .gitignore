@@ -4,8 +4,7 @@ dist/
 .env.local
 .env.*.local
 firmware/SmartPlant/arduino_secrets.h
-.supabase/
-supabase/.temp/
-.wrangler/
+firmware/SmartPlant/arduino.secrets.h
+work/
 *.log
 *.tsbuildinfo

@@ -1,9 +1,0 @@
-project_id = "smart-plant-dashboard"
-[auth]
-enable_signup = false
-[auth.email]
-enable_signup = false
-[functions.device-exchange]
-verify_jwt = false
-[functions.user-command]
-verify_jwt = true

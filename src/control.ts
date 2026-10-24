@@ -14,7 +14,6 @@ export class DeviceModel {
     ]),
   ) as Record<Actuator, Output>;
   private deadlines: Partial<Record<Actuator, number>> = {};
-  private revision: Record<Actuator, number> = { fan: 0, pump: 0, atomizer: 0 };
   private receipts = new Map<
     string,
     { id: string; status: "applied" | "rejected"; reason: string | null }
@@ -32,14 +31,7 @@ export class DeviceModel {
     const duplicate = this.receipts.get(c.id);
     if (duplicate) return duplicate;
     let reason =
-      c.session_id !== this.sessionId
-        ? "Board session changed"
-        : c.ttl_ms <= 0
-          ? "Command expired"
-          : c.revision <= this.revision[c.actuator]
-            ? "Superseded command"
-            : null;
-    if (!reason) this.revision[c.actuator] = c.revision;
+      c.session_id !== this.sessionId ? "Board session changed" : null;
     if (!reason && c.mode === "manual" && c.on)
       reason = this.safety(c.actuator, s, true);
     if (!reason) {

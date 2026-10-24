@@ -13,18 +13,14 @@ const session = "board-session-a";
 const sensor = () => ({ ...demoData().snapshot.sensors });
 const command = (overrides: Partial<Command> = {}): Command => ({
   id: randomUUID(),
-  device_id: demoData().snapshot.device_id,
   session_id: session,
   actuator: "fan",
   mode: "manual",
   on: true,
   duration_ms: 60000,
-  revision: 1,
-  expires_at: new Date(Date.now() + 30000).toISOString(),
-  ttl_ms: 30000,
   ...overrides,
 });
-test("automatic hysteresis and independent outputs match supplied rules", () => {
+test("automatic hysteresis matches the working firmware", () => {
   const d = new DeviceModel(session),
     s = sensor();
   s.temperature_c = 31;
@@ -46,7 +42,7 @@ test("automatic hysteresis and independent outputs match supplied rules", () => 
   assert.equal(d.outputs.pump.on, false);
   assert.equal(d.outputs.atomizer.on, false);
 });
-test("manual timer expires locally and duplicate delivery cannot extend it", () => {
+test("manual timer finishes locally and duplicate requests never extend it", () => {
   const d = new DeviceModel(session),
     s = sensor(),
     c = command();
@@ -58,29 +54,25 @@ test("manual timer expires locally and duplicate delivery cannot extend it", () 
   assert.equal(d.outputs.fan.mode, "auto");
   assert.equal(d.outputs.fan.on, false);
 });
-test("manual OFF is independent and persists until changed", () => {
+test("manual OFF persists independently until Auto is selected", () => {
   const d = new DeviceModel(session),
     s = sensor();
   s.temperature_c = 35;
   d.apply(command({ on: false, duration_ms: 0 }), s, 0);
   d.tick(s, 1000000);
-  assert.equal(d.outputs.fan.mode, "manual");
   assert.equal(d.outputs.fan.on, false);
+  assert.equal(d.outputs.fan.mode, "manual");
   assert.equal(d.outputs.pump.mode, "auto");
-  d.apply(
-    command({ mode: "auto", on: false, duration_ms: 0, revision: 2 }),
-    s,
-    1000001,
-  );
+  d.apply(command({ mode: "auto", on: false, duration_ms: 0 }), s, 1000001);
   assert.equal(d.outputs.fan.on, true);
 });
-test("low-water rejects activation; protective stop stays off after recovery", () => {
+test("pump low-water rejection and protective cancellation survive water recovery", () => {
   const d = new DeviceModel(session),
     s = sensor();
   s.water_percent = 10;
   assert.equal(d.apply(command({ actuator: "pump" }), s, 0).status, "rejected");
   s.water_percent = 74;
-  d.apply(command({ actuator: "pump", revision: 2 }), s, 1);
+  d.apply(command({ actuator: "pump" }), s, 1);
   assert.equal(d.outputs.pump.on, true);
   s.water_percent = 15;
   d.tick(s, 2);
@@ -90,7 +82,7 @@ test("low-water rejects activation; protective stop stays off after recovery", (
   assert.equal(d.outputs.pump.on, false);
   assert.equal(d.outputs.pump.mode, "manual");
 });
-test("invalid DHT cancels fan and atomizer but permits pump operation", () => {
+test("DHT11 failure stops fan and atomizer while the pump can still operate", () => {
   const d = new DeviceModel(session),
     s = sensor();
   for (const actuator of ["fan", "pump", "atomizer"] as const)
@@ -103,45 +95,31 @@ test("invalid DHT cancels fan and atomizer but permits pump operation", () => {
   assert.equal(d.outputs.atomizer.on, false);
   assert.equal(d.outputs.pump.on, true);
 });
-test("new boot, expired and out-of-order commands are rejected", () => {
-  const d = new DeviceModel(session),
-    s = sensor();
-  assert.equal(
-    d.apply(command({ session_id: "old-session" }), s, 0).status,
-    "rejected",
-  );
-  assert.equal(d.apply(command({ ttl_ms: 0 }), s, 0).status, "rejected");
-  d.apply(command({ revision: 3 }), s, 0);
-  assert.equal(
-    d.apply(command({ revision: 2, on: false, duration_ms: 0 }), s, 1).status,
-    "rejected",
-  );
-  const restarted = new DeviceModel("new-session");
-  assert.equal(restarted.outputs.fan.mode, "auto");
-  assert.equal(restarted.apply(command(), s, 0).status, "rejected");
+test("board restart rejects controls prepared for the old boot session", () => {
+  const d = new DeviceModel("new-session");
+  assert.equal(d.outputs.fan.mode, "auto");
+  assert.equal(d.apply(command(), sensor(), 0).status, "rejected");
 });
-test("freshness and payload validation reject invalid sensor and command values", () => {
+test("stale sensor readings and invalid payloads cannot be used as current controls", () => {
   const snapshot = demoData().snapshot;
   assert.equal(
-    isFresh(snapshot, Date.parse(snapshot.received_at) + 29999),
+    isFresh(snapshot, Date.parse(snapshot.received_at) + 9999),
     true,
   );
   assert.equal(
-    isFresh(snapshot, Date.parse(snapshot.received_at) + 30000),
+    isFresh(snapshot, Date.parse(snapshot.received_at) + 10000),
     false,
   );
-  validateTelemetry({ ...snapshot, acks: [] });
+  validateTelemetry(snapshot);
   assert.throws(() =>
     validateTelemetry({
       ...snapshot,
-      acks: [],
       sensors: { ...snapshot.sensors, soil_raw: 1024 },
     }),
   );
   assert.throws(() =>
     validateTelemetry({
       ...snapshot,
-      acks: [],
       sensors: { ...snapshot.sensors, dht_valid: false },
     }),
   );

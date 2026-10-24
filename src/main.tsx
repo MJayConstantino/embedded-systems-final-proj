@@ -16,10 +16,8 @@ import {
   CircleHelp,
   Clock3,
   Wifi,
-  WifiOff,
   ChevronRight,
   Download,
-  LogOut,
   X,
   Check,
   LoaderCircle,
@@ -37,17 +35,9 @@ import {
   type Snapshot,
   type HistoryRow,
   type EventRow,
-  type CommandRow,
   type Sensors,
 } from "./domain";
-import {
-  configured,
-  deviceId,
-  supabase,
-  loadCurrent,
-  loadHistory,
-  sendCommand,
-} from "./api";
+import { loadCurrent, sendCommand, loadConnection, connectDevice } from "./api";
 import { demoData } from "./demo";
 import "./style.css";
 
@@ -212,13 +202,9 @@ function Chart({
 function App() {
   const demo = new URLSearchParams(location.search).get("demo") === "1";
   const [tab, setTab] = useState("dashboard"),
-    [session, setSession] = useState<string | null>(null),
-    [authReady, setAuthReady] = useState(demo || !configured),
     [snapshot, setSnapshot] = useState<Snapshot | null>(null),
     [history, setHistory] = useState<HistoryRow[]>([]),
     [events, setEvents] = useState<EventRow[]>([]),
-    [commands, setCommands] = useState<CommandRow[]>([]),
-    [online, setOnline] = useState(navigator.onLine),
     [now, setNow] = useState(Date.now()),
     [error, setError] = useState(""),
     [toast, setToast] = useState(""),
@@ -227,49 +213,61 @@ function App() {
     [duration, setDuration] = useState(60000),
     [install, setInstall] = useState<InstallEvent | null>(null),
     [installHelp, setInstallHelp] = useState(false),
-    [loginBusy, setLoginBusy] = useState(false),
-    [email, setEmail] = useState(""),
-    [password, setPassword] = useState("");
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const demoDeadline = useRef<Partial<Record<Actuator, number>>>({});
+    [address, setAddress] = useState(""),
+    [addressInput, setAddressInput] = useState(""),
+    [connecting, setConnecting] = useState(false);
+  const dialogRef = useRef<HTMLDialogElement>(null),
+    demoDeadline = useRef<Partial<Record<Actuator, number>>>({}),
+    epoch = useRef(0);
   const fresh = isFresh(snapshot, now),
-    connected = online && fresh,
-    controlsEnabled = connected && !busy;
+    connected = fresh,
+    controlsEnabled = connected && !busy && !connecting;
+  function acceptSnapshot(reading: Snapshot) {
+    setSnapshot(reading);
+    if (!isFresh(reading)) return;
+    const minute = Math.floor(Date.parse(reading.received_at) / 60000);
+    setHistory((rows) =>
+      rows.at(-1) &&
+      Math.floor(Date.parse(rows.at(-1)!.recorded_at) / 60000) === minute
+        ? rows
+        : [
+            ...rows.filter(
+              (r) => Date.parse(r.recorded_at) > Date.now() - 86400000,
+            ),
+            { recorded_at: reading.received_at, sensors: reading.sensors },
+          ],
+    );
+  }
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 1000);
-    const on = () => setOnline(true),
-      off = () => setOnline(false),
-      onInstall = (e: Event) => {
-        e.preventDefault();
-        setInstall(e as InstallEvent);
-      };
-    window.addEventListener("online", on);
-    window.addEventListener("offline", off);
+    const onInstall = (e: Event) => {
+      e.preventDefault();
+      setInstall(e as InstallEvent);
+    };
     window.addEventListener("beforeinstallprompt", onInstall);
     return () => {
       clearInterval(tick);
-      window.removeEventListener("online", on);
-      window.removeEventListener("offline", off);
       window.removeEventListener("beforeinstallprompt", onInstall);
     };
   }, []);
   useEffect(() => {
-    if (!supabase || demo) return;
+    if (demo) return;
     let active = true;
-    supabase.auth.getSession().then(({ data, error }) => {
-      if (active) {
-        setSession(data.session?.user.id ?? null);
-        setAuthReady(true);
-        if (error) setError("Unable to restore sign-in. Please sign in again.");
-      }
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s?.user.id ?? null);
-      setAuthReady(true);
-    });
+    loadConnection()
+      .then((c) => {
+        if (active) {
+          setAddress(c.address ?? "");
+          setAddressInput(c.address ?? "");
+        }
+      })
+      .catch(() => {
+        if (active)
+          setError(
+            "Start the dashboard with npm run dev so the local Arduino connection is available.",
+          );
+      });
     return () => {
       active = false;
-      data.subscription.unsubscribe();
     };
   }, [demo]);
   useEffect(() => {
@@ -306,68 +304,38 @@ function App() {
     return () => clearInterval(timer);
   }, [demo]);
   useEffect(() => {
-    if (demo || !session || !supabase) return;
+    if (demo || !address) return;
     let active = true,
-      loading = false,
-      lastHistory = 0;
-    const cache = `verdant:${session}:${deviceId}`;
-    try {
-      const stored = localStorage.getItem(cache);
-      if (stored) {
-        const saved = JSON.parse(stored);
-        if (saved.snapshot?.device_id === deviceId) setSnapshot(saved.snapshot);
-      }
-    } catch {
-      /* Browser storage is optional. */
-    }
+      loading = false;
     async function refresh() {
-      if (!navigator.onLine || document.hidden || loading) return;
+      if (document.hidden || loading) return;
       loading = true;
+      const generation = epoch.current;
       try {
-        const current = await loadCurrent();
-        if (!active) return;
-        setSnapshot(current.snapshot);
-        setCommands(current.commands);
-        setError("");
-        try {
-          localStorage.setItem(
-            cache,
-            JSON.stringify({ snapshot: current.snapshot }),
-          );
-        } catch {
-          /* Storage quota can be disabled. */
-        }
-        if (Date.now() - lastHistory > 60000) {
-          const h = await loadHistory();
-          if (active) {
-            setHistory(h.history);
-            setEvents(h.events);
-          }
-          lastHistory = Date.now();
+        const reading = await loadCurrent();
+        if (active && generation === epoch.current) {
+          acceptSnapshot(reading);
+          setError("");
         }
       } catch (e) {
         if (active)
           setError(
-            e instanceof Error
-              ? e.message
-              : "Could not refresh the cloud connection.",
+            e instanceof Error ? e.message : "Cannot reach the Arduino.",
           );
       } finally {
         loading = false;
       }
     }
     void refresh();
-    const timer = setInterval(() => void refresh(), 10000);
+    const timer = setInterval(() => void refresh(), 2000);
     const visible = () => void refresh();
     document.addEventListener("visibilitychange", visible);
-    window.addEventListener("online", visible);
     return () => {
       active = false;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", visible);
-      window.removeEventListener("online", visible);
     };
-  }, [session, demo]);
+  }, [demo, address]);
   useEffect(() => {
     if (toast) {
       const t = setTimeout(() => setToast(""), 4500);
@@ -379,49 +347,36 @@ function App() {
     if (detail && dialog && !dialog.open) dialog.showModal();
     else if (!detail && dialog?.open) dialog.close();
   }, [detail]);
-  async function login(e: React.FormEvent) {
+  async function connect(e: React.FormEvent) {
     e.preventDefault();
+    setConnecting(true);
     setError("");
-    setLoginBusy(true);
+    epoch.current++;
     try {
-      const { error } = await supabase!.auth.signInWithPassword({
-        email,
-        password,
-      });
-      if (error) throw error;
-      setPassword("");
-    } catch {
-      setError("Sign-in failed. Check your project email and password.");
-    } finally {
-      setLoginBusy(false);
-    }
-  }
-  async function logout() {
-    const result = await supabase?.auth.signOut({ scope: "local" });
-    if (result?.error) {
-      setError(
-        "Could not complete sign-out. Check your connection and try again.",
+      const result = await connectDevice(addressInput.trim());
+      setHistory([]);
+      setEvents([]);
+      setAddress(result.address);
+      setAddressInput(result.address);
+      acceptSnapshot(result.snapshot);
+      setToast(
+        result.snapshot.simulated
+          ? "Connected to the local simulator."
+          : "Connected to the Arduino.",
       );
-      return;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Connection failed.");
+    } finally {
+      setConnecting(false);
     }
-    if (session)
-      try {
-        localStorage.removeItem(`verdant:${session}:${deviceId}`);
-      } catch {
-        /* Optional cache. */
-      }
-    setSession(null);
-    setSnapshot(null);
-    setHistory([]);
-    setCommands([]);
-    setEvents([]);
   }
   async function control(a: Actuator, mode: "auto" | "manual", on = false) {
     if (!controlsEnabled || !snapshot) return;
+    epoch.current++;
     setBusy(a);
     setError("");
     const input = {
-      device_id: demo ? snapshot.device_id : deviceId,
+      session_id: snapshot.session_id,
       actuator: a,
       mode,
       on,
@@ -458,12 +413,24 @@ function App() {
         ]);
         setToast("Demo control updated. No hardware is connected.");
       } else {
-        const c = await sendCommand(input);
-        setCommands((cs) => [
-          c,
-          ...cs.filter((x) => x.actuator !== a || x.status !== "pending"),
-        ]);
-        setToast("Request sent. Waiting for the Arduino to confirm.");
+        const result = await sendCommand(input);
+        acceptSnapshot(result.snapshot);
+        setEvents((es) =>
+          [
+            {
+              id: Date.now(),
+              created_at: result.command.created_at,
+              kind: result.command.status,
+              message: `${actuatorInfo[a].name} · ${mode === "auto" ? "Auto" : on ? "Manual ON" : "Manual OFF"} · ${result.command.status}${result.command.reason ? " · " + result.command.reason : ""}`,
+            },
+            ...es,
+          ].slice(0, 30),
+        );
+        setToast(
+          result.command.status === "applied"
+            ? "Arduino confirmed the output."
+            : (result.command.reason ?? "Arduino rejected the activation."),
+        );
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Command failed.");
@@ -489,101 +456,6 @@ function App() {
       </div>
     </header>
   );
-  if (!authReady)
-    return (
-      <>
-        {header}
-        <main className="login">
-          <LoaderCircle className="spin" />
-          <p>Restoring your session…</p>
-        </main>
-      </>
-    );
-  if (!demo && !session)
-    return (
-      <>
-        {header}
-        <main className="login">
-          <div className="login-art">
-            <div className="orb">
-              <Sprout size={80} strokeWidth={1.3} />
-            </div>
-            <span className="eyebrow">A LITTLE CARE. A LOT OF GROWTH.</span>
-            <h1>
-              Your plants,
-              <br />
-              <em>connected.</em>
-            </h1>
-            <p>
-              A closer look at your growing environment.
-              <br />
-              Live readings. Thoughtful control.
-            </p>
-          </div>
-          <section className="login-panel">
-            <span className="eyebrow">WELCOME TO VERDANT</span>
-            <h2>Your growing space</h2>
-            <p>Sign in with your shared project account.</p>
-            {configured ? (
-              <form onSubmit={login}>
-                <label>
-                  Project email
-                  <input
-                    type="email"
-                    autoComplete="username"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="team@example.com"
-                  />
-                </label>
-                <label>
-                  Password
-                  <input
-                    type="password"
-                    autoComplete="current-password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </label>
-                <button className="primary" disabled={loginBusy || !online}>
-                  {loginBusy ? (
-                    <LoaderCircle className="spin" size={18} />
-                  ) : (
-                    <>
-                      Sign in <ArrowUpRight size={18} />
-                    </>
-                  )}
-                </button>
-              </form>
-            ) : (
-              <div className="setup-note">
-                <SlidersHorizontal size={22} />
-                <div>
-                  <strong>Your dashboard is ready to connect</strong>
-                  <p>
-                    Add your Supabase project settings to enable sign-in and
-                    live hardware data. The setup guide includes each step.
-                  </p>
-                </div>
-              </div>
-            )}
-            {error && (
-              <p role="alert" className="error">
-                {error}
-              </p>
-            )}
-            <a className="demo-link" href="/?demo=1">
-              Explore the interactive demo <ArrowUpRight size={16} />
-            </a>
-            <p className="fine">
-              One plant system. A shared view for your team.
-            </p>
-          </section>
-        </main>
-      </>
-    );
   return (
     <>
       {header}
@@ -650,7 +522,7 @@ function App() {
                 {tab === "dashboard"
                   ? "A live look at your plant’s environment, all in one place."
                   : tab === "history"
-                    ? "Look back at the last 24 hours of your growing environment."
+                    ? "Sensor readings collected while this dashboard is open."
                     : "Your system, connection, and control preferences."}
               </p>
             </div>
@@ -662,10 +534,24 @@ function App() {
               })}
             </span>
           </div>
-          {!online && (
-            <div className="notice" role="status">
-              <WifiOff size={18} /> You’re offline. Showing saved readings;
-              remote controls are unavailable.
+          {!demo && !address && (
+            <div className="notice">
+              <Wifi size={18} />
+              <span>Connect your Arduino to start the local demo.</span>
+              <button
+                className="text-button"
+                onClick={() => setTab("settings")}
+              >
+                Connect device <ChevronRight size={15} />
+              </button>
+              <a className="text-button" href="/?demo=1">
+                Sample demo
+              </a>
+            </div>
+          )}
+          {!demo && snapshot?.simulated && (
+            <div className="demo-banner">
+              <strong>Local simulator · no physical hardware connected</strong>
             </div>
           )}
           {error && (
@@ -717,7 +603,7 @@ function App() {
                 </div>
                 <span className="subtle-tag">
                   <Activity size={13} />{" "}
-                  {demo ? "Sample data" : "Synced every 10 seconds"}
+                  {demo ? "Sample data" : "Updated every 2 seconds"}
                 </span>
               </div>
               <div className="sensor-grid">
@@ -787,12 +673,6 @@ function App() {
                   const info = actuatorInfo[a],
                     Icon = info.icon,
                     o = snapshot?.actuators[a];
-                  const pending = commands.find(
-                    (c) =>
-                      c.actuator === a &&
-                      c.status === "pending" &&
-                      (c.delivered_at || Date.parse(c.expires_at) > now),
-                  );
                   return (
                     <section
                       key={a}
@@ -814,7 +694,7 @@ function App() {
                       >
                         <button
                           aria-pressed={o?.mode === "auto"}
-                          disabled={!controlsEnabled || !!pending}
+                          disabled={!controlsEnabled}
                           className={o?.mode === "auto" ? "selected" : ""}
                           onClick={() => void control(a, "auto")}
                         >
@@ -822,7 +702,7 @@ function App() {
                         </button>
                         <button
                           aria-pressed={o?.mode === "manual"}
-                          disabled={!controlsEnabled || !!pending}
+                          disabled={!controlsEnabled}
                           className={o?.mode === "manual" ? "selected" : ""}
                           onClick={() => void control(a, "manual", false)}
                         >
@@ -831,20 +711,18 @@ function App() {
                       </div>
                       <div className="toggle-row">
                         <span>
-                          {o?.mode === "auto"
-                            ? "Automatic control"
-                            : "Manual activation"}
+                          {!o
+                            ? "Awaiting device"
+                            : o.mode === "auto"
+                              ? "Automatic control"
+                              : "Manual activation"}
                         </span>
                         <button
                           className={`toggle ${o?.on ? "checked" : ""}`}
                           role="switch"
                           aria-checked={o?.on ?? false}
                           aria-label={`Turn ${info.name} ${o?.on ? "off" : "on"}`}
-                          disabled={
-                            !controlsEnabled ||
-                            o?.mode !== "manual" ||
-                            !!pending
-                          }
+                          disabled={!controlsEnabled || o?.mode !== "manual"}
                           onClick={() => void control(a, "manual", !o?.on)}
                         >
                           <span />
@@ -869,7 +747,7 @@ function App() {
                       <div
                         className={`control-note ${o?.blocked ? "blocked" : ""}`}
                       >
-                        {busy === a || pending ? (
+                        {busy === a ? (
                           <>
                             <LoaderCircle size={13} className="spin" />
                             Waiting for device confirmation
@@ -895,9 +773,11 @@ function App() {
                         ) : (
                           <>
                             <span className="tiny-dot" />
-                            {o?.mode === "auto"
-                              ? "Managed by sensor readings"
-                              : "Manual OFF until changed"}
+                            {!o
+                              ? "Awaiting device readings"
+                              : o.mode === "auto"
+                                ? "Managed by sensor readings"
+                                : "Manual OFF until changed"}
                           </>
                         )}
                       </div>
@@ -930,7 +810,7 @@ function App() {
                     ))
                   ) : (
                     <p className="empty">
-                      Control events will appear here when the device connects.
+                      Controls you use during this session will appear here.
                     </p>
                   )}
                 </section>
@@ -945,7 +825,7 @@ function App() {
                   </h3>
                   <p>
                     Automatic rules run on your Arduino. Timed manual controls
-                    finish on the board, even if the internet disconnects.
+                    finish on the board, even if the local connection drops.
                   </p>
                   <Sprout
                     className="note-sprout"
@@ -964,10 +844,8 @@ function App() {
             <>
               <div className="section-heading">
                 <div>
-                  <h2>Last 24 hours</h2>
-                  <p>
-                    One stored sample per minute · gaps mean no valid reading.
-                  </p>
+                  <h2>This demo session</h2>
+                  <p>One chart point per minute while this tab is open.</p>
                 </div>
                 <span className="subtle-tag">
                   <Clock3 size={13} />
@@ -986,7 +864,7 @@ function App() {
                       <span>
                         {history[0]
                           ? dateTime(history[0].recorded_at)
-                          : "24 hours ago"}
+                          : "Session started"}
                       </span>
                       <span>
                         {history.length
@@ -1000,37 +878,8 @@ function App() {
               <section className="activity-panel history-events">
                 <div className="panel-title">
                   <h2>Control activity</h2>
-                  <span className="subtle-tag">Last 24 hours</span>
+                  <span className="subtle-tag">This demo session</span>
                 </div>
-                {commands.map((c) => (
-                  <div className="event" key={c.id}>
-                    <span className="event-icon">
-                      <SlidersHorizontal size={15} />
-                    </span>
-                    <div>
-                      <strong>
-                        {actuatorInfo[c.actuator].name} ·{" "}
-                        {c.mode === "auto"
-                          ? "Auto"
-                          : c.on
-                            ? "Manual ON"
-                            : "Manual OFF"}
-                      </strong>
-                      <time>
-                        {dateTime(c.created_at)} ·{" "}
-                        {c.reason ??
-                          "Output confirmation is reported by the board"}
-                      </time>
-                    </div>
-                    <span className="command-status">
-                      {c.status === "pending" &&
-                      !c.delivered_at &&
-                      Date.parse(c.expires_at) < now
-                        ? "expired"
-                        : c.status}
-                    </span>
-                  </div>
-                ))}
                 {events.map((e) => (
                   <div className="event" key={e.id}>
                     <span className="event-icon">
@@ -1042,9 +891,9 @@ function App() {
                     </div>
                   </div>
                 ))}
-                {!events.length && !commands.length && (
+                {!events.length && (
                   <p className="empty">
-                    No control events in the last 24 hours.
+                    No controls used during this session yet.
                   </p>
                 )}
               </section>
@@ -1056,7 +905,41 @@ function App() {
                 <span className="setting-icon">
                   <Settings size={22} />
                 </span>
-                <h2>Your plant station</h2>
+                <h2>Connect your Arduino</h2>
+                {demo ? (
+                  <p>
+                    This is the sample demo.{" "}
+                    <a className="text-button" href="/">
+                      Open the real dashboard <ArrowLeft size={15} />
+                    </a>
+                  </p>
+                ) : (
+                  <form onSubmit={connect}>
+                    <label>
+                      Arduino IP address
+                      <input
+                        inputMode="url"
+                        value={addressInput}
+                        onChange={(e) => setAddressInput(e.target.value)}
+                        placeholder="192.168.4.1"
+                        required
+                      />
+                    </label>
+                    <button className="primary" disabled={connecting}>
+                      {connecting ? (
+                        <LoaderCircle size={17} className="spin" />
+                      ) : (
+                        <Wifi size={17} />
+                      )}{" "}
+                      {connecting ? "Connecting…" : "Connect Arduino"}
+                    </button>
+                    <p className="fine">
+                      Use the IP printed in Serial Monitor. Your laptop, phone
+                      and Arduino must share the same Wi-Fi. No internet is
+                      needed.
+                    </p>
+                  </form>
+                )}
                 <dl>
                   <div>
                     <dt>Board</dt>
@@ -1067,12 +950,12 @@ function App() {
                     <dd>Every 2 seconds</dd>
                   </div>
                   <div>
-                    <dt>Cloud exchange</dt>
-                    <dd>Every 10 seconds</dd>
+                    <dt>Local refresh</dt>
+                    <dd>Every 2 seconds</dd>
                   </div>
                   <div>
-                    <dt>History retention</dt>
-                    <dd>24 hours</dd>
+                    <dt>Chart history</dt>
+                    <dd>Current browser session</dd>
                   </div>
                   <div>
                     <dt>Sensor calibration</dt>
@@ -1117,21 +1000,12 @@ function App() {
                   </p>
                 )}
                 <hr />
-                <h3>Project account</h3>
+                <h3>Local demo</h3>
                 <p>
-                  {demo
-                    ? "You’re exploring the demo."
-                    : email || "Shared project team account"}
-                </p>
-                {demo ? (
-                  <a className="text-button" href="/">
-                    Return to sign in <ArrowLeft size={15} />
-                  </a>
-                ) : (
-                  <button className="text-button" onClick={() => void logout()}>
-                    <LogOut size={16} /> Sign out
-                  </button>
-                )}
+                  No account, cloud service or database is used. Chart samples
+                  and control activity stay in this browser tab and reset when
+                  it closes or reloads.
+                </p>{" "}
               </section>
               <section className="settings-card wide">
                 <h2>How automatic care works</h2>

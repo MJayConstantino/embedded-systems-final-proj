@@ -311,7 +311,7 @@ void updateOLED() {
   display.display();
 }
 
-#include "CloudControl.h"
+#include "LocalControl.h"
 
 // ===================== ARDUINO SETUP AND LOOP =====================
 
@@ -358,7 +358,7 @@ void setup() {
   Serial.print(OLED_UPDATE_INTERVAL_MS);
   Serial.println(F(" ms"));
   Serial.println(F("Actuators remain OFF while sensors stabilize."));
-  initializeCloud();
+  initializeLocalWiFi();
 }
 
 void loop() {
@@ -378,7 +378,7 @@ void loop() {
   }
 
   serviceManualTimers();
-  serviceCloud();
+  serviceLocalServer();
 
   // Print continuously every second, independently of the DHT11 read rate.
   // The DHT11 values update every two seconds, while their latest values are
