@@ -19,3 +19,9 @@ export const loadConnection = () =>
   request<{ address: string | null }>("connection");
 export const connectDevice = (address: string) =>
   request<{ address: string; snapshot: Snapshot }>("connection", { address });
+
+export const configureWiFi = (input: { ssid: string; password: string }) =>
+  request<{ accepted: boolean; message: string }>("wifi", input);
+
+export const setDisplay = (enabled: boolean) =>
+  request<{ snapshot: Snapshot }>("display", { enabled });

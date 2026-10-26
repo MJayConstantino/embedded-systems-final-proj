@@ -1,7 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import {
-  isFresh,
+  isOnline,
+  validateDeviceStatus,
+  validateWiFi,
+  type Sensors,
   validateCommand,
   validateTelemetry,
   type Snapshot,
@@ -50,9 +53,30 @@ async function readJson(response: Response) {
   }
 }
 function snapshot(packet: unknown): Snapshot {
-  validateTelemetry(packet);
+  validateDeviceStatus(packet);
+  let readings_valid = packet.sample_seq > 0;
+  let sensors: Sensors;
+  try {
+    validateTelemetry(packet);
+    sensors = packet.sensors;
+  } catch {
+    readings_valid = false;
+    // Internal placeholders are never displayed or added to history as readings.
+    sensors = {
+      soil_raw: 0,
+      water_raw: 0,
+      soil_percent: 0,
+      water_percent: 0,
+      temperature_c: null,
+      humidity_percent: null,
+      dht_valid: false,
+    };
+  }
   return {
     ...packet,
+    sensors,
+    readings_valid,
+    contacted_at: new Date().toISOString(),
     received_at: new Date(Date.now() - packet.sample_age_ms).toISOString(),
   };
 }
@@ -109,7 +133,12 @@ export function createBridge(initialAddress?: string) {
       }
       if (
         req.method !== "POST" ||
-        !["/api/connection", "/api/control"].includes(path)
+        ![
+          "/api/connection",
+          "/api/control",
+          "/api/wifi",
+          "/api/display",
+        ].includes(path)
       )
         return reply({ error: "Unknown local API route" }, 404);
       if (!req.headers["content-type"]?.startsWith("application/json"))
@@ -153,11 +182,11 @@ export function createBridge(initialAddress?: string) {
           connecting = false;
         }
       }
-      if (!address || !isFresh(last))
+      if (!address || !isOnline(last))
         return reply(
           {
             error:
-              "Arduino readings are unavailable or stale. Reconnect before sending a control.",
+              "Arduino connection is unavailable or stale. Reconnect before sending a control.",
           },
           409,
         );
@@ -166,6 +195,62 @@ export function createBridge(initialAddress?: string) {
           { error: "Another control is in progress. Try again." },
           409,
         );
+      if (path === "/api/display") {
+        if (
+          !input ||
+          typeof input !== "object" ||
+          typeof (input as { enabled?: unknown }).enabled !== "boolean"
+        )
+          return reply({ error: "OLED enabled must be true or false" }, 400);
+        const enabled = (input as { enabled: boolean }).enabled;
+        controlBusy = true;
+        try {
+          const result = await deviceFetch(address, "/api/display", {
+            enabled,
+            session_id: last!.session_id,
+          });
+          const updated = snapshot(result.telemetry);
+          if (!updated.display?.ready || updated.display.enabled !== enabled)
+            throw new Error("Arduino did not confirm the OLED state");
+          last = updated;
+          return reply({ snapshot: last });
+        } finally {
+          controlBusy = false;
+        }
+      }
+      if (path === "/api/wifi") {
+        try {
+          validateWiFi(input);
+        } catch (error) {
+          return reply(
+            {
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Invalid Wi-Fi settings",
+            },
+            400,
+          );
+        }
+        controlBusy = true;
+        try {
+          const result = await deviceFetch(address, "/api/wifi", {
+            ...input,
+            session_id: last!.session_id,
+          });
+          if (result.accepted !== true)
+            throw new Error("Arduino did not accept the Wi-Fi settings");
+          address = null;
+          last = null;
+          return reply({
+            accepted: true,
+            message:
+              "Wi-Fi saved on the Arduino. Rejoin that network and enter its new IP from Serial Monitor.",
+          });
+        } finally {
+          controlBusy = false;
+        }
+      }
       validateCommand(input);
       if (input.session_id !== last!.session_id)
         return reply(

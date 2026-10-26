@@ -1,7 +1,8 @@
-// Smart Plant System - Starter Firmware
+// Verdant Smart Irrigation - Arduino UNO R4 WiFi
 // Target board: Arduino UNO R4 WiFi
 
 #include <Wire.h>
+#include <WiFiS3.h>
 #include <DHT.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -30,7 +31,8 @@ const unsigned long SENSOR_STABILIZATION_MS = 3000;
 
 // === Actuator Pins ===
 #define fanPin             5
-#define atomizerPin        11
+// Retired mist driver: keep D11 LOW. Disconnect the damaged module.
+const uint8_t RETIRED_MIST_PIN = 11;
 #define relayWaterPump     8
 
 // === Display Pins (UNO R4 hardware I2C) ===
@@ -59,34 +61,13 @@ const float FAN_ON_TEMPERATURE_C = 30.0;
 const float FAN_OFF_TEMPERATURE_C = 28.0;
 const uint8_t FAN_PWM_VALUE = 220;       // 0 = off, 255 = full speed
 
-// === Pump behavior ===
-// IRRIGATION_PUMP: waters dry soil and stops if the reservoir is too low.
-// REFILL_PUMP: fills a reservoir when its water level is low.
-enum PumpControlMode { IRRIGATION_PUMP, REFILL_PUMP };
-const PumpControlMode PUMP_MODE = IRRIGATION_PUMP;
-
-// Irrigation-pump thresholds
 const int PUMP_ON_SOIL_PERCENT = 30;
 const int PUMP_OFF_SOIL_PERCENT = 45;
 const int PUMP_MIN_WATER_ON_PERCENT = 25;
 const int PUMP_LOW_WATER_STOP_PERCENT = 15;
 
-// Reservoir-refill thresholds (used only when PUMP_MODE is REFILL_PUMP)
-const int REFILL_PUMP_ON_PERCENT = 25;
-const int REFILL_PUMP_OFF_PERCENT = 75;
-
 // Many relay boards are active LOW. Change to false if yours is active HIGH.
 const bool RELAY_ACTIVE_LOW = false;
-
-// === Atomizer thresholds (with hysteresis) ===
-// It starts only when BOTH the air humidity and soil moisture are low.
-// It stops when EITHER reading has recovered, or the reservoir is too low.
-const float ATOMIZER_ON_HUMIDITY_PERCENT = 50.0;
-const float ATOMIZER_OFF_HUMIDITY_PERCENT = 60.0;
-const int ATOMIZER_ON_SOIL_PERCENT = 35;
-const int ATOMIZER_OFF_SOIL_PERCENT = 45;
-const int ATOMIZER_MIN_WATER_PERCENT = 20;
-const uint8_t ATOMIZER_PWM_VALUE = 255;
 
 // ===================== OBJECTS AND STATE =====================
 
@@ -94,9 +75,10 @@ DHT dht(dhtSensorPin, DHT_TYPE);
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 
 bool oledReady = false;
+bool oledEnabled = true; // Always ON after reboot; remote OFF is not persisted.
+uint8_t oledAddress = OLED_ADDRESS;
 bool fanIsOn = false;
 bool pumpIsOn = false;
-bool atomizerIsOn = false;
 
 int soilRaw = 0;
 int waterRaw = 0;
@@ -122,11 +104,6 @@ void setFan(bool turnOn) {
   analogWrite(fanPin, turnOn ? FAN_PWM_VALUE : 0);
 }
 
-void setAtomizer(bool turnOn) {
-  atomizerIsOn = turnOn;
-  analogWrite(atomizerPin, turnOn ? ATOMIZER_PWM_VALUE : 0);
-}
-
 void setPump(bool turnOn) {
   pumpIsOn = turnOn;
 
@@ -139,7 +116,6 @@ void setPump(bool turnOn) {
 
 void turnAllActuatorsOff() {
   setFan(false);
-  setAtomizer(false);
   setPump(false);
 }
 
@@ -156,7 +132,7 @@ void readSensors() {
   if (isnan(newHumidity) || isnan(newTemperature)) {
     humidityPercent = NAN;
     temperatureC = NAN;
-    Serial.println(F("WARNING: DHT11 reading failed; fan and atomizer forced OFF."));
+    Serial.println(F("WARNING: DHT11 reading failed; fan forced OFF. Soil-based irrigation remains available."));
   } else {
     humidityPercent = newHumidity;
     temperatureC = newTemperature;
@@ -177,16 +153,6 @@ void updateFan() {
 }
 
 void updatePump() {
-  if (PUMP_MODE == REFILL_PUMP) {
-    // Use this only when the pump ADDS water to the measured reservoir.
-    if (!pumpIsOn && waterPercent <= REFILL_PUMP_ON_PERCENT) {
-      setPump(true);
-    } else if (pumpIsOn && waterPercent >= REFILL_PUMP_OFF_PERCENT) {
-      setPump(false);
-    }
-    return;
-  }
-
   // Default: irrigation pump. Water level acts as a dry-run safety lockout.
   if (!pumpIsOn &&
       soilPercent <= PUMP_ON_SOIL_PERCENT &&
@@ -199,29 +165,9 @@ void updatePump() {
   }
 }
 
-void updateAtomizer() {
-  if (isnan(humidityPercent)) {
-    setAtomizer(false);
-    return;
-  }
-
-  if (!atomizerIsOn &&
-      humidityPercent <= ATOMIZER_ON_HUMIDITY_PERCENT &&
-      soilPercent <= ATOMIZER_ON_SOIL_PERCENT &&
-      waterPercent >= ATOMIZER_MIN_WATER_PERCENT) {
-    setAtomizer(true);
-  } else if (atomizerIsOn &&
-             (humidityPercent >= ATOMIZER_OFF_HUMIDITY_PERCENT ||
-              soilPercent >= ATOMIZER_OFF_SOIL_PERCENT ||
-              waterPercent < ATOMIZER_MIN_WATER_PERCENT)) {
-    setAtomizer(false);
-  }
-}
-
 void updateActuators() {
   updateFan();
   updatePump();
-  updateAtomizer();
 }
 
 void printSerialMonitor() {
@@ -265,13 +211,12 @@ void printSerialMonitor() {
   Serial.print(F("Fan: "));
   Serial.print(fanIsOn ? F("ON") : F("OFF"));
   Serial.print(F(" | Pump: "));
-  Serial.print(pumpIsOn ? F("ON") : F("OFF"));
-  Serial.print(F(" | Atomizer: "));
-  Serial.println(atomizerIsOn ? F("ON") : F("OFF"));
+  Serial.println(pumpIsOn ? F("ON") : F("OFF"));
+  Serial.print(F("OLED: "));Serial.println(!oledReady?F("NOT DETECTED"):oledEnabled?F("ON"):F("OFF"));
 }
 
 void updateOLED() {
-  if (!oledReady) return;
+  if (!oledReady || !oledEnabled) return;
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
@@ -305,12 +250,23 @@ void updateOLED() {
   display.print(F(" Pump:"));
   display.println(pumpIsOn ? F("ON") : F("OFF"));
 
-  display.print(F("Atomizer: "));
-  display.println(atomizerIsOn ? F("ON") : F("OFF"));
+  display.print(F("IP:"));
+  display.println(WiFi.localIP());
 
   display.display();
 }
 
+bool setOLEDEnabled(bool enabled) {
+  if(!oledReady)return false;
+  oledEnabled=enabled;
+  display.ssd1306_command(enabled?SSD1306_DISPLAYON:SSD1306_DISPLAYOFF);
+  if(enabled)updateOLED();
+  return true;
+}
+bool oledResponds(uint8_t address) {
+  Wire.beginTransmission(address);
+  return Wire.endTransmission()==0;
+}
 #include "LocalControl.h"
 
 // ===================== ARDUINO SETUP AND LOOP =====================
@@ -320,7 +276,8 @@ void setup() {
 
   // Configure outputs and immediately place every actuator in its OFF state.
   pinMode(fanPin, OUTPUT);
-  pinMode(atomizerPin, OUTPUT);
+  digitalWrite(RETIRED_MIST_PIN, LOW);
+  pinMode(RETIRED_MIST_PIN, OUTPUT);
   pinMode(relayWaterPump, OUTPUT);
   turnAllActuatorsOff();
 
@@ -336,10 +293,18 @@ void setup() {
 
   // UNO R4 uses its fixed hardware SDA/SCL pins when Wire.begin() is called.
   Wire.begin();
-  oledReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS);
+  oledEnabled = true;
+  const bool foundDefault=oledResponds(OLED_ADDRESS);
+  oledAddress=foundDefault?OLED_ADDRESS:0x3D;
+  const bool detected=foundDefault||oledResponds(oledAddress);
+  oledReady = detected && display.begin(SSD1306_SWITCHCAPVCC, oledAddress);
+  if(oledReady){
+    display.ssd1306_command(SSD1306_DISPLAYON);
+    Serial.print(F("OLED detected at 0x"));Serial.println(oledAddress, HEX);
+  }
 
   if (!oledReady) {
-    Serial.println(F("WARNING: OLED not detected. Check address and wiring."));
+    Serial.println(F("OLED unavailable. Checked 0x3C and 0x3D. Check power, GND and hardware SDA/SCL wiring."));
   } else {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
@@ -350,14 +315,14 @@ void setup() {
     display.display();
   }
 
-  Serial.println(F("Smart plant system starting."));
+  Serial.println(F("Verdant irrigation system starting."));
   Serial.print(F("Serial baud rate: "));
   Serial.println(SERIAL_BAUD_RATE);
   Serial.println(F("Sensor values will print continuously every 1 second."));
   Serial.print(F("OLED refresh interval: "));
   Serial.print(OLED_UPDATE_INTERVAL_MS);
   Serial.println(F(" ms"));
-  Serial.println(F("Actuators remain OFF while sensors stabilize."));
+  Serial.println(F("Auto waits for sensors. Timed Manual control is available without readings."));
   initializeLocalWiFi();
 }
 
@@ -370,11 +335,7 @@ void loop() {
     readSensors();
     sampleSequence++;
 
-    if (currentMillis >= SENSOR_STABILIZATION_MS) {
-      applyLocalControl();
-    } else {
-      turnAllActuatorsOff();
-    }
+    applyLocalControl(); // Manual remains available while sensors stabilize.
   }
 
   serviceManualTimers();

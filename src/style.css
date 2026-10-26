@@ -505,7 +505,7 @@ h3 {
 }
 .actuator-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 17px;
 }
 .actuator-card {
@@ -1778,4 +1778,40 @@ form input {
     animation: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+.wifi-form {
+  max-width: 560px;
+}
+.wifi-form fieldset {
+  border: 0;
+  padding: 0;
+  margin: 16px 0;
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+.wifi-form label {
+  display: grid;
+  gap: 7px;
+}
+.wifi-form input {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.wifi-form fieldset:disabled {
+  opacity: 0.65;
+}
+.manual-warning {
+  margin: 12px 0 0;
+}
+
+.display-card {
+  margin-top: 20px;
+}
+.display-card .panel-title {
+  align-items: center;
 }

@@ -31,13 +31,21 @@ import type { LucideIcon } from "lucide-react";
 import {
   ACTUATORS,
   isFresh,
+  isOnline,
   type Actuator,
   type Snapshot,
   type HistoryRow,
   type EventRow,
   type Sensors,
 } from "./domain";
-import { loadCurrent, sendCommand, loadConnection, connectDevice } from "./api";
+import {
+  loadCurrent,
+  sendCommand,
+  loadConnection,
+  connectDevice,
+  configureWiFi,
+  setDisplay,
+} from "./api";
 import { demoData } from "./demo";
 import "./style.css";
 
@@ -81,7 +89,7 @@ const sensors: {
     icon: Wind,
     color: "blue",
     description:
-      "DHT11 relative humidity. The atomizer starts when humidity is at most 50% and soil moisture at most 35%, with enough water.",
+      "DHT11 relative humidity for monitoring only. Irrigation depends on soil moisture and reservoir level, not air humidity.",
     pin: "A2 · DHT11",
   },
   {
@@ -108,18 +116,11 @@ const actuatorInfo: Record<
     rule: "On at 30°C; off at 28°C. DHT11 failure forces OFF.",
   },
   pump: {
-    name: "Water pump",
+    name: "Irrigation pump",
     label: "Soil irrigation",
     icon: Waves,
     pin: "D8 · relay, active HIGH",
     rule: "On at soil ≤30% with water ≥25%. Off at soil ≥45% or water ≤15%.",
-  },
-  atomizer: {
-    name: "Mist atomizer",
-    label: "Humidity control",
-    icon: Wind,
-    pin: "D11 · PWM 255/255",
-    rule: "On at humidity ≤50% and soil ≤35% with water ≥20%. Off at humidity ≥60%, soil ≥45%, low water, or DHT11 failure.",
   },
 };
 type InstallEvent = Event & {
@@ -215,13 +216,20 @@ function App() {
     [installHelp, setInstallHelp] = useState(false),
     [address, setAddress] = useState(""),
     [addressInput, setAddressInput] = useState(""),
-    [connecting, setConnecting] = useState(false);
+    [connecting, setConnecting] = useState(false),
+    [wifiSSID, setWifiSSID] = useState(""),
+    [wifiPassword, setWifiPassword] = useState(""),
+    [savingWiFi, setSavingWiFi] = useState(false),
+    [displayBusy, setDisplayBusy] = useState(false),
+    [wifiMessage, setWifiMessage] = useState(""),
+    [networkOnline, setNetworkOnline] = useState(navigator.onLine);
   const dialogRef = useRef<HTMLDialogElement>(null),
     demoDeadline = useRef<Partial<Record<Actuator, number>>>({}),
     epoch = useRef(0);
   const fresh = isFresh(snapshot, now),
-    connected = fresh,
-    controlsEnabled = connected && !busy && !connecting;
+    connected = isOnline(snapshot, now) && networkOnline,
+    controlsEnabled =
+      connected && !busy && !connecting && !savingWiFi && !displayBusy;
   function acceptSnapshot(reading: Snapshot) {
     setSnapshot(reading);
     if (!isFresh(reading)) return;
@@ -370,6 +378,61 @@ function App() {
       setConnecting(false);
     }
   }
+  async function toggleDisplay() {
+    if (!controlsEnabled || !snapshot?.display?.ready) return;
+    setDisplayBusy(true);
+    setError("");
+    epoch.current++;
+    const enabled = !snapshot.display.enabled;
+    try {
+      if (demo) {
+        setSnapshot((s) =>
+          s ? { ...s, display: { ...s.display!, enabled } } : s,
+        );
+        setToast("Demo OLED updated. No hardware is connected.");
+      } else {
+        const result = await setDisplay(enabled);
+        acceptSnapshot(result.snapshot);
+        setToast(`Arduino confirmed OLED ${enabled ? "ON" : "OFF"}.`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not set OLED state");
+    } finally {
+      setDisplayBusy(false);
+    }
+  }
+  async function saveWiFi(e: React.FormEvent) {
+    e.preventDefault();
+    if (demo || !connected || snapshot?.simulated || savingWiFi) return;
+    setSavingWiFi(true);
+    setError("");
+    setWifiMessage("");
+    try {
+      const result = await configureWiFi({
+        ssid: wifiSSID,
+        password: wifiPassword,
+      });
+      epoch.current++;
+      setWifiMessage(result.message);
+      setSnapshot(null);
+      setAddress("");
+      setAddressInput("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not configure Wi-Fi");
+    } finally {
+      setWifiPassword("");
+      setSavingWiFi(false);
+    }
+  }
+  useEffect(() => {
+    const online = () => setNetworkOnline(navigator.onLine);
+    addEventListener("online", online);
+    addEventListener("offline", online);
+    return () => {
+      removeEventListener("online", online);
+      removeEventListener("offline", online);
+    };
+  }, []);
   async function control(a: Actuator, mode: "auto" | "manual", on = false) {
     if (!controlsEnabled || !snapshot) return;
     epoch.current++;
@@ -449,7 +512,7 @@ function App() {
         </span>
       </a>
       <div className="top-right">
-        <span className="project-label">SMART PLANT SYSTEM</span>
+        <span className="project-label">SMART IRRIGATION</span>
         <span className="avatar" aria-label="Project team">
           SP
         </span>
@@ -488,7 +551,7 @@ function App() {
                 <br />
                 Room to grow.
               </strong>
-              <p>Stay close to your plant’s environment, wherever you are.</p>
+              <p>Check soil moisture and control watering over local Wi-Fi.</p>
             </div>
             <span className="version">
               <Radio size={13} /> UNO R4 WiFi · v1.0
@@ -510,17 +573,17 @@ function App() {
           )}
           <div className="page-heading">
             <div>
-              <span className="eyebrow">YOUR GROWING SPACE</span>
+              <span className="eyebrow">YOUR IRRIGATION STATION</span>
               <h1>
                 {tab === "dashboard"
-                  ? "A little closer to nature."
+                  ? "Watering, with a clearer view."
                   : tab === "history"
                     ? "Every reading tells a story."
                     : "Make yourself at home."}
               </h1>
               <p>
                 {tab === "dashboard"
-                  ? "A live look at your plant’s environment, all in one place."
+                  ? "Soil moisture, reservoir supply and watering controls in one place."
                   : tab === "history"
                     ? "Sensor readings collected while this dashboard is open."
                     : "Your system, connection, and control preferences."}
@@ -565,10 +628,10 @@ function App() {
               <Sprout size={24} />
             </div>
             <div className="system-name">
-              <strong>Plant station 01</strong>
+              <strong>Irrigation station 01</strong>
               <span>
-                Arduino UNO R4 WiFi <span className="separator">/</span> Indoor
-                growing system
+                Arduino UNO R4 WiFi <span className="separator">/</span>{" "}
+                Soil-based irrigation system
               </span>
             </div>
             <div className={`connection ${connected ? "live" : ""}`}>
@@ -590,8 +653,13 @@ function App() {
           </section>
           {snapshot && !fresh && (
             <p className="stale-date">
-              Last device reading: {dateTime(snapshot.received_at)}. Controls
-              will return when fresh readings arrive.
+              Sensor readings are unavailable or stale.
+              {snapshot.sample_seq > 0 && (
+                <> Last sensor update: {dateTime(snapshot.received_at)}.</>
+              )}
+              {connected
+                ? " Manual controls are available while the Arduino is connected."
+                : " Reconnect the Arduino to use controls."}
             </p>
           )}
           {tab === "dashboard" && (
@@ -610,7 +678,11 @@ function App() {
                 {sensors.map((sensor) => {
                   const Icon = sensor.icon,
                     value = snapshot?.sensors[sensor.key],
-                    invalid = value === null || value === undefined;
+                    invalid =
+                      snapshot?.readings_valid === false ||
+                      !snapshot?.sample_seq ||
+                      value === null ||
+                      value === undefined;
                   return (
                     <button
                       className={`sensor-card ${sensor.color}`}
@@ -661,8 +733,8 @@ function App() {
               </div>
               <div className="section-heading controls-heading">
                 <div>
-                  <h2>Plant care controls</h2>
-                  <p>A helping hand, when your plants need one.</p>
+                  <h2>Irrigation & ventilation</h2>
+                  <p>Automatic watering with an optional ventilation fan.</p>
                 </div>
                 <span className="subtle-tag">
                   <SlidersHorizontal size={13} /> Independent control
@@ -709,6 +781,14 @@ function App() {
                           Manual
                         </button>
                       </div>
+                      {o?.mode === "manual" && (
+                        <p className="fine manual-warning">
+                          Sensor-independent control.{" "}
+                          {a === "pump"
+                            ? "Check the reservoir before watering."
+                            : "Temperature protection applies in Auto only."}
+                        </p>
+                      )}
                       <div className="toggle-row">
                         <span>
                           {!o
@@ -785,6 +865,37 @@ function App() {
                   );
                 })}
               </div>
+              <section className="settings-card display-card">
+                <div className="panel-title">
+                  <h2>OLED display</h2>
+                  <button
+                    className={`toggle ${snapshot?.display?.enabled ? "checked" : ""}`}
+                    role="switch"
+                    aria-label="OLED display"
+                    aria-checked={snapshot?.display?.enabled ?? false}
+                    disabled={!controlsEnabled || !snapshot?.display?.ready}
+                    onClick={() => void toggleDisplay()}
+                  >
+                    <span />
+                  </button>
+                </div>
+                <p>
+                  {displayBusy
+                    ? "Waiting for board confirmation…"
+                    : !connected
+                      ? "Connect the Arduino to control its display."
+                      : !snapshot?.display
+                        ? "Upload the latest firmware for OLED controls."
+                        : !snapshot.display.ready
+                          ? "OLED not detected at 0x3C or 0x3D. Check its power, GND and SDA/SCL wiring."
+                          : `Board reports OLED ${snapshot.display.enabled ? "ON" : "OFF"} at 0x${snapshot.display.address?.toString(16).toUpperCase()}.`}
+                </p>
+                <p className="fine">
+                  Starts ON after every reboot. Sensor readings are not
+                  required. The board checks I²C detection; this does not
+                  confirm that pixels are visible.
+                </p>
+              </section>
               <div className="bottom-grid">
                 <section className="activity-panel">
                   <div className="panel-title">
@@ -819,9 +930,9 @@ function App() {
                     <Leaf size={14} /> GROWING, TOGETHER
                   </span>
                   <h3>
-                    Care continues.
+                    Watering runs locally.
                     <br />
-                    Even when you’re away.
+                    Your Arduino stays in control.
                   </h3>
                   <p>
                     Automatic rules run on your Arduino. Timed manual controls
@@ -978,7 +1089,7 @@ function App() {
                 <h2>Keep Verdant close</h2>
                 <p>
                   Install the dashboard on your home screen for quick access to
-                  your plant station.
+                  your irrigation station.
                 </p>
                 <button
                   className="primary"
@@ -1008,7 +1119,85 @@ function App() {
                 </p>{" "}
               </section>
               <section className="settings-card wide">
-                <h2>How automatic care works</h2>
+                <h2>Join your Wi-Fi</h2>
+                <p>
+                  First connect your laptop to Verdant-Demo (password:
+                  plantdemo) and connect this dashboard to 192.168.4.1. Enter
+                  your own 2.4 GHz Wi-Fi below. The Arduino remembers it after
+                  restart.
+                </p>
+                <form onSubmit={saveWiFi} className="wifi-form">
+                  <fieldset
+                    disabled={
+                      demo ||
+                      !connected ||
+                      !!snapshot?.simulated ||
+                      savingWiFi ||
+                      displayBusy ||
+                      !!busy
+                    }
+                  >
+                    <label>
+                      Wi-Fi network name (SSID)
+                      <input
+                        value={wifiSSID}
+                        onChange={(e) => setWifiSSID(e.target.value)}
+                        maxLength={32}
+                        required
+                        autoComplete="off"
+                      />
+                    </label>
+                    <label>
+                      Wi-Fi password
+                      <input
+                        type="password"
+                        value={wifiPassword}
+                        onChange={(e) => setWifiPassword(e.target.value)}
+                        minLength={8}
+                        maxLength={63}
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <p className="fine">
+                      Leave the password empty only for an open network.
+                      Credentials go to the Arduino and are not stored in this
+                      browser or the laptop bridge.
+                    </p>
+                    <button className="primary" disabled={savingWiFi}>
+                      {savingWiFi ? "Saving…" : "Save & join Wi-Fi"}
+                    </button>
+                  </fieldset>
+                </form>
+                {(demo || snapshot?.simulated || !connected) && (
+                  <p className="fine">
+                    Connect a real Arduino to enable Wi-Fi setup. The sample
+                    demo cannot change hardware Wi-Fi.
+                  </p>
+                )}
+                {wifiMessage && (
+                  <p role="status" className="notice">
+                    {wifiMessage}
+                  </p>
+                )}
+                <p className="fine">
+                  Saving changes the board’s network and disconnects this
+                  session. Put the laptop and phone back on your network, read
+                  the Arduino’s new IP in Serial Monitor at 9600 baud, then
+                  reconnect above. If joining fails, the setup hotspot returns
+                  after two connection attempts.
+                </p>
+                <h3>Local endpoints</h3>
+                <p className="fine">
+                  Board:{" "}
+                  <code>GET {address || "http://ARDUINO_IP"}/api/status</code>,{" "}
+                  <code>POST /api/control</code>, <code>POST /api/display</code>
+                  , <code>POST /api/wifi</code>. This laptop forwards requests
+                  from the dashboard. Manual commands require a live connection,
+                  not sensor readings.
+                </p>
+              </section>
+              <section className="settings-card wide">
+                <h2>How irrigation and ventilation work</h2>
                 {ACTUATORS.map((a) => (
                   <div className="rule" key={a}>
                     <strong>
@@ -1019,10 +1208,12 @@ function App() {
                   </div>
                 ))}
                 <p className="fine">
-                  Manual ON bypasses activation thresholds, but retains
-                  low-water and DHT11 protections. A protective stop cancels
-                  manual activation and leaves it OFF until another command.
-                  Restart returns all controls to Auto.
+                  Manual ON ignores sensor thresholds and sensor-based lockouts,
+                  so it works without readings. Check the reservoir before
+                  running the pump. Timers finish on the Arduino and return the
+                  control to Auto. Auto retains low-water and DHT11 protections.
+                  Restart returns both controls to Auto. Humidity is monitoring
+                  only; it does not trigger watering.
                 </p>
               </section>
             </div>
@@ -1031,7 +1222,7 @@ function App() {
             <span>
               <Leaf size={13} /> Made for a greener everyday.
             </span>
-            <span>VERDANT / SMART PLANT SYSTEM</span>
+            <span>VERDANT / SMART IRRIGATION</span>
           </footer>
         </main>
       </div>
@@ -1092,7 +1283,10 @@ function App() {
               <div>
                 <dt>Current reading</dt>
                 <dd>
-                  {snapshot?.sensors[detail.key] ?? "Unavailable"} {detail.unit}
+                  {snapshot?.readings_valid === false || !snapshot?.sample_seq
+                    ? "Unavailable"
+                    : (snapshot?.sensors[detail.key] ?? "Unavailable")}{" "}
+                  {detail.unit}
                 </dd>
               </div>
               {(detail.key === "soil_percent" ||
@@ -1100,9 +1294,13 @@ function App() {
                 <div>
                   <dt>Raw analog value</dt>
                   <dd>
-                    {snapshot?.sensors[
-                      detail.key === "soil_percent" ? "soil_raw" : "water_raw"
-                    ] ?? "Unavailable"}{" "}
+                    {snapshot?.readings_valid === false || !snapshot?.sample_seq
+                      ? "Unavailable"
+                      : (snapshot?.sensors[
+                          detail.key === "soil_percent"
+                            ? "soil_raw"
+                            : "water_raw"
+                        ] ?? "Unavailable")}{" "}
                     / 1023
                   </dd>
                 </div>

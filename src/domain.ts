@@ -1,4 +1,4 @@
-export const ACTUATORS = ["fan", "pump", "atomizer"] as const;
+export const ACTUATORS = ["pump", "fan"] as const;
 export type Actuator = (typeof ACTUATORS)[number];
 export type Mode = "auto" | "manual";
 export type Output = {
@@ -16,7 +16,13 @@ export type Sensors = {
   humidity_percent: number | null;
   dht_valid: boolean;
 };
+export type DisplayStatus = {
+  ready: boolean;
+  enabled: boolean;
+  address: number | null;
+};
 export type Telemetry = {
+  display?: DisplayStatus;
   device_id: string;
   session_id: string;
   sample_seq: number;
@@ -26,7 +32,30 @@ export type Telemetry = {
   actuators: Record<Actuator, Output>;
   simulated?: boolean;
 };
-export type Snapshot = Telemetry & { received_at: string };
+export type Snapshot = Telemetry & {
+  received_at: string;
+  contacted_at?: string;
+  readings_valid?: boolean;
+};
+export type DeviceStatus = Omit<Telemetry, "sensors"> & { sensors?: unknown };
+export type WiFiInput = { ssid: string; password: string };
+export function validateWiFi(x: unknown): asserts x is WiFiInput {
+  if (
+    !object(x) ||
+    typeof x.ssid !== "string" ||
+    !x.ssid.trim() ||
+    new TextEncoder().encode(x.ssid).length > 32 ||
+    x.ssid.includes("\0") ||
+    typeof x.password !== "string" ||
+    x.password.includes("\0") ||
+    (x.password.length !== 0 &&
+      (new TextEncoder().encode(x.password).length < 8 ||
+        new TextEncoder().encode(x.password).length > 63))
+  )
+    throw new Error(
+      "Use an SSID of 1–32 bytes and an 8–63 byte password, or leave the password empty for an open network",
+    );
+}
 export type CommandInput = {
   session_id: string;
   actuator: Actuator;
@@ -76,7 +105,7 @@ export function validateCommand(x: unknown): asserts x is CommandInput {
   if (x.mode === "auto" && x.on)
     throw new Error("Auto does not specify an ON state");
 }
-export function validateTelemetry(x: unknown): asserts x is Telemetry {
+export function validateDeviceStatus(x: unknown): asserts x is DeviceStatus {
   if (
     !object(x) ||
     typeof x.device_id !== "string" ||
@@ -85,25 +114,9 @@ export function validateTelemetry(x: unknown): asserts x is Telemetry {
     !integer(x.sample_seq) ||
     !integer(x.uptime_ms) ||
     !integer(x.sample_age_ms) ||
-    !object(x.sensors) ||
     !object(x.actuators)
   )
-    throw new Error("Invalid device readings");
-  const s = x.sensors;
-  if (
-    !integer(s.soil_raw, 1023) ||
-    !integer(s.water_raw, 1023) ||
-    !number(s.soil_percent, 0, 100) ||
-    !number(s.water_percent, 0, 100) ||
-    typeof s.dht_valid !== "boolean"
-  )
-    throw new Error("Invalid analog readings");
-  if (
-    s.dht_valid
-      ? !number(s.temperature_c, -40, 80) || !number(s.humidity_percent, 0, 100)
-      : s.temperature_c !== null || s.humidity_percent !== null
-  )
-    throw new Error("Invalid DHT11 readings");
+    throw new Error("Invalid device status");
   for (const a of ACTUATORS) {
     const o = x.actuators[a];
     if (
@@ -118,12 +131,46 @@ export function validateTelemetry(x: unknown): asserts x is Telemetry {
     )
       throw new Error("Invalid actuator state");
   }
+  if (
+    x.display !== undefined &&
+    (!object(x.display) ||
+      typeof x.display.ready !== "boolean" ||
+      typeof x.display.enabled !== "boolean" ||
+      ![null, 60, 61].includes(x.display.address as number | null))
+  )
+    throw new Error("Invalid OLED status");
   if (x.simulated !== undefined && typeof x.simulated !== "boolean")
     throw new Error("Invalid device type");
+}
+export function validateTelemetry(x: unknown): asserts x is Telemetry {
+  validateDeviceStatus(x);
+  const s = x.sensors;
+  if (
+    !object(s) ||
+    !integer(s.soil_raw, 1023) ||
+    !integer(s.water_raw, 1023) ||
+    !number(s.soil_percent, 0, 100) ||
+    !number(s.water_percent, 0, 100) ||
+    typeof s.dht_valid !== "boolean"
+  )
+    throw new Error("Invalid analog readings");
+  if (
+    s.dht_valid
+      ? !number(s.temperature_c, -40, 80) || !number(s.humidity_percent, 0, 100)
+      : s.temperature_c !== null || s.humidity_percent !== null
+  )
+    throw new Error("Invalid DHT11 readings");
+}
+export function isOnline(snapshot: Snapshot | null, now = Date.now()) {
+  const time = Date.parse(
+    snapshot?.contacted_at ?? snapshot?.received_at ?? "",
+  );
+  return !!snapshot && now - time < 10000 && now >= time - 5000;
 }
 export function isFresh(snapshot: Snapshot | null, now = Date.now()) {
   return (
     !!snapshot &&
+    snapshot.readings_valid !== false &&
     snapshot.sample_seq > 0 &&
     now - Date.parse(snapshot.received_at) < 10000 &&
     now >= Date.parse(snapshot.received_at) - 5000

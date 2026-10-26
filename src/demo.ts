@@ -13,6 +13,7 @@ export function demoData() {
     uptime_ms: 86400000,
     sample_age_ms: 0,
     simulated: true,
+    display: { ready: true, enabled: true, address: 60 },
     sensors: {
       soil_raw: 500,
       water_raw: 518,
@@ -45,13 +46,13 @@ export function demoData() {
       id: 1,
       created_at: new Date(now - 240000).toISOString(),
       kind: "automatic",
-      message: "Fan turned on · automatic temperature control",
+      message: "Irrigation pump · automatic soil-moisture control available",
     },
     {
       id: 2,
       created_at: new Date(now - 1800000).toISOString(),
       kind: "applied",
-      message: "Pump · timed manual activation completed",
+      message: "Irrigation pump · timed manual activation completed",
     },
     {
       id: 3,
